@@ -1,0 +1,781 @@
+import os
+import json
+import pickle
+import argparse
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+import pymysql
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import classification_report, mean_absolute_error, mean_squared_error
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.utils.class_weight import compute_class_weight
+
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Input, LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.optimizers import Adam
+
+print("TensorFlow版本:", tf.__version__)
+print("GPU设备:", tf.config.list_physical_devices("GPU"))
+
+plt.rcParams["font.sans-serif"] = ["SimHei"]
+plt.rcParams["axes.unicode_minus"] = False
+tf.get_logger().setLevel("ERROR")
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+MYSQL_CONFIG = {
+    "host": "localhost",
+    "user": "root",
+    "password": "1111",
+    "database": "rain",
+    "charset": "utf8mb4"
+}
+
+DEFAULT_TARGET_TYPE = "city"
+DEFAULT_TARGET_NAME = "武汉市"
+
+DATA_START_DATE = "2022-01-01"
+
+
+
+# TIME_STEP = 30          # 缩短序列，训练速度提升
+# TRAIN_RATIO = 0.8
+# EPOCHS = 25             # 减少轮次，模型更强
+# BATCH_SIZE = 512        # 更大批次，GPU 利用率拉满
+# CLS_THRESHOLD = 0.45
+
+TIME_STEP = 60          # 增加序列长度，捕捉更长周期的降雨规律
+TRAIN_RATIO = 0.8
+EPOCHS = 80             # 增加训练轮次
+BATCH_SIZE = 128        # 减小批次，提升梯度稳定性
+CLS_THRESHOLD = 0.45
+
+
+BASE_MODEL_DIR = "models"
+
+RAIN_LEVEL_NAMES = {0: "小雨", 1: "中雨", 2: "大雨", 3: "暴雨"}
+NUM_RAIN_LEVELS = 4
+
+
+def get_model_paths(target_type: str, target_name: str):
+    model_dir = os.path.join(BASE_MODEL_DIR, target_type, target_name)
+    return {
+        "model_dir": model_dir,
+        "rf_model_path": os.path.join(model_dir, "rf_classifier.pkl"),
+        "level_model_path": os.path.join(model_dir, "rain_level_best.keras"),
+        "feature_scaler_path": os.path.join(model_dir, "feature_scaler.pkl"),
+        "meta_path": os.path.join(model_dir, "meta.json"),
+    }
+
+
+@dataclass
+class PreparedData:
+    df: pd.DataFrame
+    seq_feature_cols: list
+    cls_feature_cols: list
+    feature_scaler: MinMaxScaler
+
+    X_train_seq: np.ndarray
+    X_test_seq: np.ndarray
+    X_train_cls: np.ndarray
+    X_test_cls: np.ndarray
+
+    y_train_cls: np.ndarray
+    y_test_cls: np.ndarray
+    y_train_level: np.ndarray
+    y_test_level: np.ndarray
+    y_train_mm: np.ndarray
+    y_test_mm: np.ndarray
+
+    train_dates: list
+    test_dates: list
+    train_level_to_mm: dict
+
+
+def get_db_connection():
+    return pymysql.connect(**MYSQL_CONFIG)
+
+
+def query_all_city_names() -> list[str]:
+    sql = """
+    SELECT name
+    FROM city
+    WHERE name IS NOT NULL AND name <> ''
+    ORDER BY province_id, id
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql)
+            result = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+        df = pd.DataFrame(result, columns=columns)
+    finally:
+        conn.close()
+
+    if df.empty:
+        return []
+
+    return df["name"].dropna().astype(str).tolist()
+
+
+def load_city_rainfall(city_name: str) -> pd.DataFrame:
+    sql = """
+    SELECT date, rainfall
+    FROM city_daily_rainfall
+    WHERE name = %s
+    ORDER BY date ASC
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, [city_name])
+            result = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+        df = pd.DataFrame(result, columns=columns)
+    finally:
+        conn.close()
+
+    if df.empty:
+        raise ValueError(f"未找到城市 {city_name} 的降雨数据。")
+    return df
+
+
+
+def load_province_rainfall(province_name: str) -> pd.DataFrame:
+    """
+    省份训练口径：按省内城市“日平均降雨量”构造历史序列
+    """
+    sql = """
+    SELECT
+        cdr.date AS date,
+        AVG(COALESCE(cdr.rainfall, 0)) AS rainfall
+    FROM city_daily_rainfall cdr
+    JOIN city c ON cdr.city_id = c.id
+    JOIN province p ON c.province_id = p.id
+    WHERE p.name = %s
+    GROUP BY cdr.date
+    ORDER BY cdr.date ASC
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, [province_name])
+            result = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+        df = pd.DataFrame(result, columns=columns)
+    finally:
+        conn.close()
+
+    if df.empty:
+        raise ValueError(f"未找到省份 {province_name} 的平均降雨数据。")
+    return df
+
+def query_all_province_names() -> list[str]:
+    sql = """
+    SELECT name
+    FROM province
+    WHERE name IS NOT NULL AND name <> ''
+    ORDER BY id
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql)
+            result = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+        df = pd.DataFrame(result, columns=columns)
+    finally:
+        conn.close()
+
+    if df.empty:
+        return []
+
+    return df["name"].dropna().astype(str).tolist()
+
+
+def load_target_rainfall(target_type: str, target_name: str) -> pd.DataFrame:
+    if target_type == "city":
+        return load_city_rainfall(target_name)
+    elif target_type == "province":
+        return load_province_rainfall(target_name)
+    else:
+        raise ValueError(f"不支持的 target_type: {target_type}")
+
+
+def clean_and_fill_dates(df: pd.DataFrame) -> pd.DataFrame:
+    data = df.copy()
+    data["date"] = pd.to_datetime(data["date"])
+    data["rainfall"] = pd.to_numeric(data["rainfall"], errors="coerce")
+    data = data.drop_duplicates(subset=["date"], keep="last")
+
+    full_dates = pd.date_range(data["date"].min(), data["date"].max(), freq="D")
+    full_df = pd.DataFrame({"date": full_dates})
+    data = pd.merge(full_df, data, on="date", how="left")
+    data["rainfall"] = data["rainfall"].fillna(0.0)
+    return data
+
+
+def rainfall_to_rain_level(x: float) -> int:
+    if x <= 0:
+        raise ValueError("只应用于雨天样本")
+    if x < 10:
+        return 0
+    if x < 25:
+        return 1
+    if x < 50:
+        return 2
+    return 3
+
+
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    data = df.copy()
+    data["month"] = data["date"].dt.month
+    data["day_of_year"] = data["date"].dt.dayofyear
+
+    data["month_sin"] = np.sin(2 * np.pi * data["month"] / 12)
+    data["month_cos"] = np.cos(2 * np.pi * data["month"] / 12)
+    data["doy_sin"] = np.sin(2 * np.pi * data["day_of_year"] / 366)
+    data["doy_cos"] = np.cos(2 * np.pi * data["day_of_year"] / 366)
+
+    rainy = (data["rainfall"] > 0).astype(int)
+    raw_streak = rainy.groupby((rainy == 0).cumsum()).cumsum()
+
+    data["lag_1"] = data["rainfall"].shift(1)
+    data["lag_3"] = data["rainfall"].shift(3)
+    data["lag_7"] = data["rainfall"].shift(7)
+
+    data["rolling_mean_7"] = data["rainfall"].shift(1).rolling(7).mean()
+    data["rolling_max_7"] = data["rainfall"].shift(1).rolling(7).max()
+    data["rolling_sum_7"] = data["rainfall"].shift(1).rolling(7).sum()
+    data["rolling_std_7"] = data["rainfall"].shift(1).rolling(7).std()
+
+    data["prev_is_rainy"] = rainy.shift(1)
+    data["prev_rain_streak"] = raw_streak.shift(1).fillna(0)
+    data["recent_rain_days_7"] = rainy.shift(1).rolling(7).sum()
+
+    data["target_cls"] = (data["rainfall"] > 0).astype(int)
+    data["target_level"] = -1
+    rain_mask = data["rainfall"] > 0
+    data.loc[rain_mask, "target_level"] = data.loc[rain_mask, "rainfall"].apply(rainfall_to_rain_level)
+
+    data = data.dropna().reset_index(drop=True)
+    data["target_cls"] = data["target_cls"].astype(int)
+    data["target_level"] = data["target_level"].astype(int)
+    return data
+
+
+def create_sequences(seq_features, cls_features, y_cls, y_level, y_mm, dates, time_step):
+    X_seq, X_cls, cls_y, level_y, mm_y, out_dates = [], [], [], [], [], []
+
+    for i in range(len(seq_features) - time_step):
+        target_idx = i + time_step
+        X_seq.append(seq_features[i:target_idx])
+        X_cls.append(cls_features[target_idx])
+        cls_y.append(y_cls[target_idx])
+        level_y.append(y_level[target_idx])
+        mm_y.append(y_mm[target_idx])
+        out_dates.append(dates[target_idx])
+
+    return (
+        np.asarray(X_seq, dtype=np.float32),
+        np.asarray(X_cls, dtype=np.float32),
+        np.asarray(cls_y, dtype=np.int32),
+        np.asarray(level_y, dtype=np.int32),
+        np.asarray(mm_y, dtype=np.float32),
+        out_dates,
+    )
+
+
+def build_train_level_to_mm(df_train: pd.DataFrame) -> dict:
+    mapping = {}
+    fallback = {0: 5.0, 1: 17.5, 2: 37.5, 3: 75.0}
+    for lv in range(NUM_RAIN_LEVELS):
+        vals = df_train.loc[(df_train["target_level"] == lv) & (df_train["rainfall"] > 0), "rainfall"]
+        mapping[lv] = float(vals.median()) if len(vals) > 0 else fallback[lv]
+    return mapping
+
+
+def levels_to_mm(levels: np.ndarray, level_to_mm: dict) -> np.ndarray:
+    return np.array([level_to_mm[int(x)] for x in levels], dtype=np.float32)
+
+
+def prepare_data(target_type: str, target_name: str, time_step: int, train_ratio: float) -> PreparedData:
+    df = load_target_rainfall(target_type, target_name)
+    df = clean_and_fill_dates(df)
+    df = df[df["date"] >= pd.to_datetime(DATA_START_DATE)].copy().reset_index(drop=True)
+    if df.empty:
+        raise ValueError("无有效数据")
+
+    df = add_features(df)
+
+    seq_feature_cols = [
+        "rainfall",
+        "lag_1", "lag_3", "lag_7",
+        "rolling_mean_7", "rolling_max_7", "rolling_sum_7", "rolling_std_7",
+        "prev_is_rainy", "prev_rain_streak", "recent_rain_days_7",
+        "month_sin", "month_cos", "doy_sin", "doy_cos",
+    ]
+    cls_feature_cols = [
+        "lag_1", "lag_3", "lag_7",
+        "rolling_mean_7", "rolling_max_7", "rolling_sum_7", "rolling_std_7",
+        "prev_is_rainy", "prev_rain_streak", "recent_rain_days_7",
+        "month_sin", "month_cos", "doy_sin", "doy_cos",
+    ]
+
+    seq_values_raw = df[seq_feature_cols].values.astype(np.float32)
+    cls_values_raw = df[cls_feature_cols].values.astype(np.float32)
+    y_cls_raw = df["target_cls"].values.astype(np.int32)
+    y_level_raw = df["target_level"].values.astype(np.int32)
+    y_mm_raw = df["rainfall"].values.astype(np.float32)
+    all_dates = df["date"].tolist()
+
+    split_index = int(len(df) * train_ratio)
+    if split_index <= time_step:
+        raise ValueError("训练集太短，至少要大于 TIME_STEP")
+
+    feature_scaler = MinMaxScaler()
+    feature_scaler.fit(seq_values_raw[:split_index])
+    full_seq_scaled = feature_scaler.transform(seq_values_raw)
+
+    X_train_seq, X_train_cls, y_train_cls, y_train_level, y_train_mm, train_dates = create_sequences(
+        full_seq_scaled[:split_index],
+        cls_values_raw[:split_index],
+        y_cls_raw[:split_index],
+        y_level_raw[:split_index],
+        y_mm_raw[:split_index],
+        all_dates[:split_index],
+        time_step,
+    )
+
+    X_test_seq, X_test_cls, y_test_cls, y_test_level, y_test_mm, test_dates = create_sequences(
+        full_seq_scaled[split_index - time_step:],
+        cls_values_raw[split_index - time_step:],
+        y_cls_raw[split_index - time_step:],
+        y_level_raw[split_index - time_step:],
+        y_mm_raw[split_index - time_step:],
+        all_dates[split_index - time_step:],
+        time_step,
+    )
+
+    df_train = df.iloc[:split_index].copy()
+    train_level_to_mm = build_train_level_to_mm(df_train)
+
+    return PreparedData(
+        df=df,
+        seq_feature_cols=seq_feature_cols,
+        cls_feature_cols=cls_feature_cols,
+        feature_scaler=feature_scaler,
+        X_train_seq=X_train_seq,
+        X_test_seq=X_test_seq,
+        X_train_cls=X_train_cls,
+        X_test_cls=X_test_cls,
+        y_train_cls=y_train_cls,
+        y_test_cls=y_test_cls,
+        y_train_level=y_train_level,
+        y_test_level=y_test_level,
+        y_train_mm=y_train_mm,
+        y_test_mm=y_test_mm,
+        train_dates=train_dates,
+        test_dates=test_dates,
+        train_level_to_mm=train_level_to_mm,
+    )
+
+
+def build_rain_level_model(time_step: int, feature_dim: int, num_classes: int):
+    model = Sequential([
+        Input(shape=(time_step, feature_dim)),
+        LSTM(64, return_sequences=True),
+        Dropout(0.20),
+        LSTM(32),
+        Dropout(0.20),
+        Dense(16, activation="relu"),
+        Dense(num_classes, activation="softmax"),
+    ])
+    model.compile(
+        optimizer=Adam(learning_rate=0.001),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    return model
+
+
+def oversample_rain_level_data(X, y):
+    rng = np.random.default_rng(42)
+    class_indices = {cls: np.where(y == cls)[0] for cls in range(NUM_RAIN_LEVELS)}
+    class_counts = {cls: len(idx) for cls, idx in class_indices.items() if len(idx) > 0}
+    if not class_counts:
+        raise ValueError("训练集中没有雨天样本，无法训练 LSTM 雨强模型")
+
+    max_count = max(class_counts.values())
+    target_count = min(max(1, int(max_count * 0.6)), 600)
+
+    X_list, y_list = [], []
+    for cls in range(NUM_RAIN_LEVELS):
+        idx = class_indices.get(cls, np.array([], dtype=int))
+        if len(idx) == 0:
+            continue
+        if len(idx) < target_count:
+            extra = rng.choice(idx, target_count - len(idx), replace=True)
+            idx = np.concatenate([idx, extra])
+        X_list.append(X[idx])
+        y_list.append(y[idx])
+
+    Xb = np.concatenate(X_list, axis=0)
+    yb = np.concatenate(y_list, axis=0)
+    shf = rng.permutation(len(yb))
+    return Xb[shf], yb[shf]
+
+
+def build_rain_level_class_weight(y_level: np.ndarray) -> dict:
+    classes = np.unique(y_level)
+    weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_level)
+    w = {int(c): float(v) for c, v in zip(classes, weights)}
+    return {
+        0: w.get(0, 1.0),
+        1: w.get(1, 1.5),
+        2: w.get(2, 2.0),
+        3: w.get(3, 3.0),
+    }
+
+
+@tf.function(jit_compile=False)
+def fast_predict_level(model, x):
+    return model(x)
+
+
+def _count_prev_rain_streak(rainfall_series: pd.Series) -> int:
+    streak = 0
+    for x in rainfall_series.iloc[::-1]:
+        if float(x) > 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def build_next_day_inputs(prepared: PreparedData, time_step: int):
+    hist = prepared.df.copy()
+    if len(hist) < time_step:
+        raise ValueError("历史长度不足，无法构造明日输入")
+
+    next_date = hist["date"].iloc[-1] + pd.Timedelta(days=1)
+
+    next_seq_raw = hist[prepared.seq_feature_cols].tail(time_step).values.astype(np.float32)
+    next_seq_scaled = prepared.feature_scaler.transform(next_seq_raw).reshape(1, time_step, -1)
+
+    rainfall_hist = hist["rainfall"].astype(float)
+    last7 = rainfall_hist.tail(7)
+
+    next_cls_dict = {
+        "lag_1": float(rainfall_hist.iloc[-1]),
+        "lag_3": float(rainfall_hist.iloc[-3]),
+        "lag_7": float(rainfall_hist.iloc[-7]),
+        "rolling_mean_7": float(last7.mean()),
+        "rolling_max_7": float(last7.max()),
+        "rolling_sum_7": float(last7.sum()),
+        "rolling_std_7": float(last7.std(ddof=1)) if len(last7) > 1 else 0.0,
+        "prev_is_rainy": float(rainfall_hist.iloc[-1] > 0),
+        "prev_rain_streak": float(_count_prev_rain_streak(rainfall_hist)),
+        "recent_rain_days_7": float((last7 > 0).sum()),
+        "month_sin": float(np.sin(2 * np.pi * next_date.month / 12)),
+        "month_cos": float(np.cos(2 * np.pi * next_date.month / 12)),
+        "doy_sin": float(np.sin(2 * np.pi * next_date.dayofyear / 366)),
+        "doy_cos": float(np.cos(2 * np.pi * next_date.dayofyear / 366)),
+    }
+
+    next_cls_raw = np.array([[next_cls_dict[c] for c in prepared.cls_feature_cols]], dtype=np.float32)
+    return next_seq_scaled, next_cls_raw, next_date
+
+
+def save_outputs(prepared: PreparedData, rf_model, next_date, target_type: str, target_name: str):
+    paths = get_model_paths(target_type, target_name)
+    os.makedirs(paths["model_dir"], exist_ok=True)
+
+    with open(paths["rf_model_path"], "wb") as f:
+        pickle.dump(rf_model, f)
+
+    with open(paths["feature_scaler_path"], "wb") as f:
+        pickle.dump(prepared.feature_scaler, f)
+
+    meta = {
+        "target_type": target_type,
+        "target_name": target_name,
+        "time_step": TIME_STEP,
+        "seq_cols": prepared.seq_feature_cols,
+        "cls_cols": prepared.cls_feature_cols,
+        "next_date": str(next_date),
+        "threshold": CLS_THRESHOLD,
+        "level_map": prepared.train_level_to_mm,
+        "names": RAIN_LEVEL_NAMES,
+    }
+
+    with open(paths["meta_path"], "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+#单独使用
+def train_and_predict(
+    target_type: str,
+    target_name: str,
+    show_plot: bool = True,
+    verbose_eval: bool = True,
+    do_predict_preview: bool = True,
+):
+
+    #批量使用
+    paths = get_model_paths(target_type, target_name)
+    prepared = prepare_data(target_type, target_name, TIME_STEP, TRAIN_RATIO)
+    feature_dim = prepared.X_train_seq.shape[2]
+
+    os.makedirs(paths["model_dir"], exist_ok=True)
+
+    print(f"\n开始训练: {target_type} / {target_name}")
+
+    print("\n训练 RF 分类器（无泄漏版）...")
+    train_y = prepared.y_train_cls.astype(int)
+    classes_arr = np.array([0, 1])
+    weights = compute_class_weight(class_weight="balanced", classes=classes_arr, y=train_y)
+    class_weight_dict = {0: float(weights[0]), 1: float(weights[1])}
+
+    rf = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=8,
+        min_samples_split=4,
+        min_samples_leaf=2,
+        class_weight=class_weight_dict,
+        random_state=42,
+        n_jobs=-1,
+    )
+    rf.fit(prepared.X_train_cls, train_y)
+    yp_prob = rf.predict_proba(prepared.X_test_cls)[:, 1]
+    yp_cls = (yp_prob >= CLS_THRESHOLD).astype(int)
+
+    print("\n训练 LSTM 雨强分类器（无泄漏版）...")
+    train_mask = prepared.y_train_cls == 1
+    Xl = prepared.X_train_seq[train_mask]
+    yl = prepared.y_train_level[train_mask]
+
+    Xlb, ylb = oversample_rain_level_data(Xl, yl)
+    lw = build_rain_level_class_weight(ylb)
+    model = build_rain_level_model(TIME_STEP, feature_dim, NUM_RAIN_LEVELS)
+
+    callbacks = [
+        EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
+        ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-5),
+
+    ]
+    # callbacks = [
+    #     EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
+    #     ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, min_lr=1e-5),
+    #     # 暂时去掉
+    #     # ModelCheckpoint(paths["level_model_path"], save_best_only=True),
+    # ]
+    fit_verbose = 1 if verbose_eval else 0
+
+    history = model.fit(
+        Xlb,
+        ylb,
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        validation_split=0.1,
+        callbacks=callbacks,
+        class_weight=lw,
+        shuffle=True,
+        verbose=fit_verbose,
+    )
+    # 暂时加上
+    model.save(paths["level_model_path"])
+
+
+    if show_plot:
+        plt.figure(figsize=(10, 4))
+        plt.plot(history.history["loss"], label="train_loss")
+        plt.plot(history.history["val_loss"], label="val_loss")
+        plt.title("LSTM训练损失曲线")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
+    print("\n测试集推理中...")
+    X_test_seq_tensor = tf.convert_to_tensor(prepared.X_test_seq, dtype=tf.float32)
+    yp_level_prob = fast_predict_level(model, X_test_seq_tensor).numpy()
+    yp_level = np.argmax(yp_level_prob, axis=1)
+
+    yp_mm = levels_to_mm(yp_level, prepared.train_level_to_mm)
+    y_final = np.where(yp_cls == 1, yp_mm, 0.0)
+
+    mae = mean_absolute_error(prepared.y_test_mm, y_final)
+    rmse = np.sqrt(mean_squared_error(prepared.y_test_mm, y_final))
+
+    if verbose_eval:
+        print("\n===== 下雨分类评估 =====")
+        print(classification_report(prepared.y_test_cls, yp_cls, zero_division=0))
+
+        test_rain_mask = prepared.y_test_cls == 1
+        if test_rain_mask.sum() > 0:
+            print("\n===== 雨强分类评估（仅真实雨天） =====")
+            print(
+                classification_report(
+                    prepared.y_test_level[test_rain_mask],
+                    yp_level[test_rain_mask],
+                    labels=[0, 1, 2, 3],
+                    target_names=[RAIN_LEVEL_NAMES[i] for i in range(NUM_RAIN_LEVELS)],
+                    zero_division=0,
+                )
+            )
+
+        print(f"\nMAE  = {mae:.4f}")
+        print(f"RMSE = {rmse:.4f}")
+
+    # 4) 真正的“明天预测”
+    next_date = None
+    prob = None
+    rain_pred = None
+    level_pred_prob = None
+    level_pred = None
+    mm_pred = None
+
+
+
+    if do_predict_preview:
+        next_seq_scaled, next_cls_raw, next_date = build_next_day_inputs(prepared, TIME_STEP)
+        next_seq_tensor = tf.convert_to_tensor(next_seq_scaled, dtype=tf.float32)
+
+        prob = rf.predict_proba(next_cls_raw)[:, 1][0]
+        rain_pred = 1 if prob >= CLS_THRESHOLD else 0
+
+        level_pred_prob = fast_predict_level(model, next_seq_tensor).numpy()[0]
+        level_pred = int(np.argmax(level_pred_prob))
+        mm_pred = prepared.train_level_to_mm[level_pred] if rain_pred else 0.0
+
+        if verbose_eval:
+            print(
+                f"\n预测 {next_date.date()}："
+                f"{'下雨' if rain_pred else '无雨'}，"
+                f"{RAIN_LEVEL_NAMES.get(level_pred, '无雨')}，"
+                f"{mm_pred:.1f} mm"
+            )
+            print(f"下雨概率：{prob:.4f}")
+            print(f"雨强概率：{level_pred_prob}")
+
+    if show_plot:
+        y_true = prepared.y_test_mm
+        y_pred = y_final
+        abs_error = np.abs(y_true - y_pred)
+
+        # 新增：为 MAE / RMSE 曲线准备数据
+        error = y_true - y_pred
+        window = min(15, len(y_true))  # 滑动窗口，可改成 7 / 15 / 30
+        rolling_mae = pd.Series(np.abs(error)).rolling(window=window, min_periods=1).mean()
+        rolling_rmse = pd.Series(error ** 2).rolling(window=window, min_periods=1).mean().pow(0.5)
+
+        # 图1：真实值 vs 预测值，并在图中显示 MAE / RMSE
+        plt.figure(figsize=(14, 5))
+        plt.plot(prepared.test_dates, y_true, label="真实降雨量(mm)", alpha=0.8)
+        plt.plot(prepared.test_dates, y_pred, label="预测降雨量(mm)", alpha=0.8)
+        plt.title(f"{target_name} 测试集：真实值 vs 预测值")
+        plt.xlabel("日期")
+        plt.ylabel("降雨量(mm)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 在图中写入指标
+        plt.text(
+            0.01, 0.95,
+            f"MAE = {mae:.4f}\nRMSE = {rmse:.4f}",
+            transform=plt.gca().transAxes,
+            fontsize=11,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
+        )
+
+        plt.tight_layout()
+        plt.show()
+
+        # 图2：逐点绝对误差图
+        # plt.figure(figsize=(14, 4))
+        # plt.plot(prepared.test_dates, abs_error, label="绝对误差 |真实值-预测值|", alpha=0.8)
+        # plt.title(f"{target_name} 测试集绝对误差图")
+        # plt.xlabel("日期")
+        # plt.ylabel("误差(mm)")
+        # plt.legend()
+        # plt.grid(True, alpha=0.3)
+        # plt.tight_layout()
+        # plt.show()
+
+        # 图2：滑动 MAE / RMSE 变化图
+        plt.figure(figsize=(14, 4))
+        plt.plot(prepared.test_dates, rolling_mae, label=f"滑动MAE (窗口={window})", alpha=0.8)
+        plt.plot(prepared.test_dates, rolling_rmse, label=f"滑动RMSE (窗口={window})", alpha=0.8)
+        plt.title(f"{target_name} 测试集误差指标变化图")
+        plt.xlabel("日期")
+        plt.ylabel("误差值")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+        # 图3：散点对比图（越接近对角线越好）
+        plt.figure(figsize=(6, 6))
+        plt.scatter(y_true, y_pred, alpha=0.6)
+        min_val = min(np.min(y_true), np.min(y_pred))
+        max_val = max(np.max(y_true), np.max(y_pred))
+        plt.plot([min_val, max_val], [min_val, max_val], "--", label="理想预测线")
+        plt.title(f"{target_name} 真实值-预测值散点图")
+        plt.xlabel("真实降雨量(mm)")
+        plt.ylabel("预测降雨量(mm)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+    if next_date is None:
+        next_date = prepared.df["date"].iloc[-1] + pd.Timedelta(days=1)
+
+    save_outputs(prepared, rf, next_date.date(), target_type, target_name)
+
+    return {
+        "target_type": target_type,
+        "target_name": target_name,
+        "model_dir": paths["model_dir"],
+        "test_mae": float(mae),
+        "test_rmse": float(rmse),
+        "next_date": str(next_date.date()),
+        "next_day_rain_prob": float(prob),
+        "next_day_rain_pred": int(rain_pred),
+        "next_day_level_pred": int(level_pred),
+        "next_day_level_prob": [float(x) for x in level_pred_prob],
+        "next_day_mm_pred": float(mm_pred),
+        "train_size": int(len(prepared.X_train_cls)),
+        "test_size": int(len(prepared.X_test_cls)),
+    }
+
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="训练单个地区降雨模型")
+    parser.add_argument("--target_type", type=str, default=DEFAULT_TARGET_TYPE, help="city 或 province")
+    parser.add_argument("--target_name", type=str, default=DEFAULT_TARGET_NAME, help="例如 武汉市 / 湖北省")
+    parser.add_argument("--no_plot", action="store_true", help="不显示图表")
+    parser.add_argument("--quiet_eval", action="store_true", help="不打印详细评估")
+    args = parser.parse_args()
+
+    # result = train_and_predict(
+    #     target_type=args.target_type,
+    #     target_name=args.target_name,
+    #     show_plot=not args.no_plot
+    # )
+    result = train_and_predict(
+        target_type=args.target_type,
+        target_name=args.target_name,
+        show_plot=not args.no_plot,
+        verbose_eval=not args.quiet_eval,
+        do_predict_preview=True,
+    )
+    print("\n训练完成：")
+    print(json.dumps(result, ensure_ascii=False, indent=2))

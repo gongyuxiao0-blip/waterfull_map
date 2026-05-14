@@ -1,0 +1,52 @@
+{
+  "target_type": "city",
+  "target_name": "邵阳市",
+  "time_step": 30,
+  "seq_cols": [
+    "rainfall",
+    "lag_1",
+    "lag_3",
+    "lag_7",
+    "rolling_mean_7",
+    "rolling_max_7",
+    "rolling_sum_7",
+    "rolling_std_7",
+    "prev_is_rainy",
+    "prev_rain_streak",
+    "recent_rain_days_7",
+    "month_sin",
+    "month_cos",
+    "doy_sin",
+    "doy_cos"
+  ],
+  "cls_cols": [
+    "lag_1",
+    "lag_3",
+    "lag_7",
+    "rolling_mean_7",
+    "rolling_max_7",
+    "rolling_sum_7",
+    "rolling_std_7",
+    "prev_is_rainy",
+    "prev_rain_streak",
+    "recent_rain_days_7",
+    "month_sin",
+    "month_cos",
+    "doy_sin",
+    "doy_cos"
+  ],
+  "next_date": "2026-05-15",
+  "threshold": 0.45,
+  "level_map": {
+    "0": 1.4,
+    "1": 13.6,
+    "2": 35.2,
+    "3": 55.849999999999994
+  },
+  "names": {
+    "0": "小雨",
+    "1": "中雨",
+    "2": "大雨",
+    "3": "暴雨"
+  }
+}
