@@ -1,7 +1,7 @@
 {
   "target_type": "province",
   "target_name": "湖北省",
-  "time_step": 60,
+  "time_step": 30,
   "seq_cols": [
     "rainfall",
     "lag_1",
@@ -35,13 +35,13 @@
     "doy_sin",
     "doy_cos"
   ],
-  "next_date": "2026-05-15",
+  "next_date": "2026-05-26",
   "threshold": 0.45,
   "level_map": {
-    "0": 0.65294,
-    "1": 14.61176,
-    "2": 30.57647,
-    "3": 56.62059
+    "0": 0.7,
+    "1": 13.42353,
+    "2": 32.588235,
+    "3": 53.62353
   },
   "names": {
     "0": "小雨",

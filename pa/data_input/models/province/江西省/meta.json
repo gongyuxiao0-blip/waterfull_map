@@ -35,7 +35,7 @@
     "doy_sin",
     "doy_cos"
   ],
-  "next_date": "2026-05-15",
+  "next_date": "2026-05-26",
   "threshold": 0.45,
   "level_map": {
     "0": 0.97273,

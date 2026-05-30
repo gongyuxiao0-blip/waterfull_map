@@ -3,10 +3,15 @@ from flask_cors import CORS
 import pymysql
 from datetime import datetime, timedelta
 import logging
+from agent.agent_routes import agent_bp
+
+
+
 
 # ======================
 # 彩色日志配置（替换这里）
 # ======================
+
 class ColorFormatter(logging.Formatter):
     def format(self, record):
         reset = "\033[0m"
@@ -45,6 +50,8 @@ from services.predict_region import (
 
 app = Flask(__name__)
 CORS(app)
+app.register_blueprint(agent_bp)
+print(app.url_map)
 
 MYSQL_CONFIG = {
     "host": "localhost",

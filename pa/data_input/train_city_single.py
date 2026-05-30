@@ -38,7 +38,7 @@ MYSQL_CONFIG = {
 DEFAULT_TARGET_TYPE = "city"
 DEFAULT_TARGET_NAME = "武汉市"
 
-DATA_START_DATE = "2022-01-01"
+DATA_START_DATE = "2024-01-01"
 
 
 
@@ -48,9 +48,9 @@ DATA_START_DATE = "2022-01-01"
 # BATCH_SIZE = 512        # 更大批次，GPU 利用率拉满
 # CLS_THRESHOLD = 0.45
 
-TIME_STEP = 60          # 增加序列长度，捕捉更长周期的降雨规律
+TIME_STEP = 30          # 增加序列长度，捕捉更长周期的降雨规律
 TRAIN_RATIO = 0.8
-EPOCHS = 80             # 增加训练轮次
+EPOCHS = 25             # 增加训练轮次
 BATCH_SIZE = 128        # 减小批次，提升梯度稳定性
 CLS_THRESHOLD = 0.45
 

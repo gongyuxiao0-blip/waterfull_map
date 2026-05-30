@@ -35,6 +35,13 @@
             >
               预测信息
             </div>
+            <div
+              class="tab-item"
+              :class="{ active: activeTab === 'agent' }"
+              @click="activeTab = 'agent'"
+            >
+              预测信息
+            </div>
           </div>
 
           <!-- 内容区域 -->
@@ -43,8 +50,14 @@
               v-if="activeTab === 'weather'"
               :currentLevel="currentLevel"
             />
+
             <PredicterComponents
-              v-else
+              v-if="activeTab === 'predict'"
+              :currentLevel="currentLevel"
+            />
+
+            <AgentChatComponents
+              v-if="activeTab === 'agent'"
               :currentLevel="currentLevel"
             />
           </div>
@@ -63,16 +76,16 @@
 </template>
 
 <script setup>
-import { ref } from "vue"
-import WeatherComponents from "@/components/weatherComponents.vue"
-import PredicterComponents from "@/components/predicterComponents.vue"
-import MapComponents from "@/components/mapComponents.vue"
-
-const currentLevel = ref("china")
-const activeTab = ref("weather")
+import { ref } from "vue";
+import WeatherComponents from "@/components/weatherComponents.vue";
+import PredicterComponents from "@/components/predicterComponents.vue";
+import MapComponents from "@/components/mapComponents.vue";
+import AgentChatComponents from "@/components/AgentChatComponents.vue";
+const currentLevel = ref("china");
+const activeTab = ref("weather");
 
 function handleCurrentLevelChange(newLevel) {
-  currentLevel.value = newLevel
+  currentLevel.value = newLevel;
 }
 </script>
 
@@ -82,7 +95,11 @@ function handleCurrentLevelChange(newLevel) {
   min-height: 100vh;
   overflow: hidden;
   background:
-    radial-gradient(circle at 50% 35%, rgba(0, 180, 255, 0.18), transparent 30%),
+    radial-gradient(
+      circle at 50% 35%,
+      rgba(0, 180, 255, 0.18),
+      transparent 30%
+    ),
     linear-gradient(180deg, #031225 0%, #061a35 45%, #020b18 100%);
   padding: 18px;
   box-sizing: border-box;
@@ -97,7 +114,10 @@ function handleCurrentLevelChange(newLevel) {
     linear-gradient(rgba(71, 163, 255, 0.12) 1px, transparent 1px),
     linear-gradient(90deg, rgba(71, 163, 255, 0.12) 1px, transparent 1px),
     radial-gradient(rgba(91, 220, 255, 0.25) 1px, transparent 1px);
-  background-size: 40px 40px, 40px 40px, 24px 24px;
+  background-size:
+    40px 40px,
+    40px 40px,
+    24px 24px;
   background-position: center center;
   opacity: 0.22;
   pointer-events: none;
@@ -152,7 +172,14 @@ function handleCurrentLevelChange(newLevel) {
     rgba(0, 150, 255, 0.18)
   );
   border: 1px solid rgba(90, 220, 255, 0.45);
-  clip-path: polygon(16px 0, calc(100% - 16px) 0, 100% 50%, calc(100% - 16px) 100%, 16px 100%, 0 50%);
+  clip-path: polygon(
+    16px 0,
+    calc(100% - 16px) 0,
+    100% 50%,
+    calc(100% - 16px) 100%,
+    16px 100%,
+    0 50%
+  );
   box-shadow:
     0 0 20px rgba(0, 170, 255, 0.18),
     inset 0 0 20px rgba(80, 220, 255, 0.08);
@@ -212,8 +239,20 @@ function handleCurrentLevelChange(newLevel) {
   pointer-events: none;
   border-radius: inherit;
   background:
-    linear-gradient(90deg, rgba(89, 230, 255, 0.22), transparent 18%, transparent 82%, rgba(89, 230, 255, 0.22)),
-    linear-gradient(180deg, rgba(89, 230, 255, 0.18), transparent 20%, transparent 80%, rgba(89, 230, 255, 0.18));
+    linear-gradient(
+      90deg,
+      rgba(89, 230, 255, 0.22),
+      transparent 18%,
+      transparent 82%,
+      rgba(89, 230, 255, 0.22)
+    ),
+    linear-gradient(
+      180deg,
+      rgba(89, 230, 255, 0.18),
+      transparent 20%,
+      transparent 80%,
+      rgba(89, 230, 255, 0.18)
+    );
   opacity: 0.45;
 }
 
