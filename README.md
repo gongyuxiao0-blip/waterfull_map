@@ -5,10 +5,10 @@
 
 ## 后端方面
 ### 打开pa文件夹执行以下步骤：
-执行rain_crawer.py进行数据爬取
-执行provinceRain_database.py进行数据库数据整合
-分别执行train_all_cities.py和train_all_provinces.py进行本地模型预测分析(LSTM , RF)
-打开后端主程序app.py
+- 执行rain_crawer.py进行数据爬取
+- 执行provinceRain_database.py进行数据库数据整合
+- 分别执行train_all_cities.py和train_all_provinces.py进行本地模型预测分析(LSTM , RF)
+- 打开后端主程序app.py
 
 ## 前端方面
     打开Rainfull_map文件夹执行以下步骤
