@@ -1,15 +1,23 @@
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain_deepseek import ChatDeepSeek
 
 from .rain_tools import query_recent_rainfall, predict_future_rainfall
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+api_key = os.getenv("DEEPSEEK_API_KEY")
+if not api_key:
+    raise RuntimeError(
+        "缺少环境变量 DEEPSEEK_API_KEY，请在 pa/data_input/agent/.env 中配置"
+    )
 
 model = ChatDeepSeek(
     model="deepseek-chat",
-    api_key="sk-ef0c900f0ce9434fb786828453dab4ac",
+    api_key=api_key,
     base_url="https://api.deepseek.com",
     temperature=0
 )

@@ -1,0 +1,100 @@
+# =========================
+# waterfull_map
+# Vue3 + Vite 前端 / Flask + LangChain 后端 / LSTM+RF 模型
+# =========================
+
+# ----- OS -----
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ----- IDE / editor -----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# ----- Secrets & local env -----
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+
+# virtualenv
+venv/
+.venv/
+env/
+ENV/
+
+# test / typecheck / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ----- Node / Vue / Vite (Rainfull_map) -----
+node_modules/
+Rainfull_map/dist/
+Rainfull_map/dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ----- Logs & crawler runtime -----
+*.log
+logs/
+rainfall_crawl_*.log
+
+# LangChain / SQLite local cache
+*.sqlite
+*.sqlite3
+*.db
+
+# ----- TensorFlow / Keras / sklearn -----
+# 训练产物由 train_all_cities.py / train_all_provinces.py 生成，约 1GB
+# 保留 models/**/meta.json 与 train_summary.json
+pa/data_input/models/**/*.keras
+pa/data_input/models/**/*.pkl
+pa/data_input/models/**/*.h5
+pa/data_input/models/**/*.hdf5
+checkpoints/
+*.ckpt
+*.ckpt.*
+*.pb
+*.onnx
+*.pt
+*.pth
+*.npy
+*.npz
+events.out.tfevents.*
+tensorboard/
+
+# ----- Misc -----
+*.bak
+*.tmp
+*.temp
+*.orig
+.cache/
+)

@@ -1,8 +1,10 @@
-import pymysql
 import os
+from pathlib import Path
+
+import pymysql
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 def get_db_connection():
     return pymysql.connect(
